@@ -303,6 +303,7 @@ def run_single_call_from_context(
             "q": quarter_label,
             "transcript": transcript_text,
             "sector": sector,
+            "as_of_date": transcript_date[:10] if transcript_date and len(transcript_date) >= 10 else None,
         }
         financials_text = _summarize_financials(context.get("financials"))
 

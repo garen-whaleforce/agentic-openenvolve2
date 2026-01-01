@@ -80,7 +80,8 @@ class ComparativeAgent:
         self,
         ticker: str,
         quarter: str,
-        limit: int = 10
+        limit: int = 10,
+        as_of_date: str | None = None,  # Added for lookahead protection
     ) -> List[Dict[str, Any]]:
         """Get peer facts from PostgreSQL DB as primary data source.
 
@@ -94,7 +95,7 @@ class ComparativeAgent:
                 logger.info("PostgreSQL DB not available, will use Neo4j")
                 return []
 
-            peer_data = get_peer_facts_summary(ticker, quarter, limit=limit)
+            peer_data = get_peer_facts_summary(ticker, quarter, limit=limit, as_of_date=as_of_date)
             if not peer_data:
                 logger.debug("No peer data in PostgreSQL for %s/%s", ticker, quarter)
                 return []
@@ -333,6 +334,7 @@ class ComparativeAgent:
         peers: list[str] | None = None,
         sector: str | None = None,
         top_k: int = 8,  # Lowered from 50 to 10
+        as_of_date: str | None = None,  # Added for lookahead protection
     ) -> str:
         """Analyse a batch of facts; return one consolidated LLM answer.
 
@@ -348,7 +350,7 @@ class ComparativeAgent:
         peers_len = len(peers) if peers else 0
 
         # --- Step 1: Try PostgreSQL DB first (primary source) ---
-        deduped_similar = self._get_peer_facts_from_pg(ticker, quarter, limit=10)
+        deduped_similar = self._get_peer_facts_from_pg(ticker, quarter, limit=10, as_of_date=as_of_date)
 
         # --- Step 2: Fallback to Neo4j if PostgreSQL has no data ---
         if not deduped_similar:

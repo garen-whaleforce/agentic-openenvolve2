@@ -367,9 +367,10 @@ class MainAgent:
                 facts_for_peers = _ensure_list_of_dicts(buckets["CompareWithPeers"])
                 facts_for_peers = facts_for_peers[:MAX_FACTS_PER_HELPER]
                 sector = row.get("sector") if isinstance(row, dict) else getattr(row, "sector", None)
+                as_of_date = row.get("as_of_date") if isinstance(row, dict) else getattr(row, "as_of_date", None)
 
                 def run_comparative():
-                    res = self.comparative_agent.run(facts_for_peers, ticker, quarter, peers, sector=sector)
+                    res = self.comparative_agent.run(facts_for_peers, ticker, quarter, peers, sector=sector, as_of_date=as_of_date)
                     return ("peers", res)
                 fut = executor.submit(run_comparative)
                 tasks.append(fut)

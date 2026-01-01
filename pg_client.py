@@ -36,6 +36,24 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+
+# =============================================================================
+# Environment Variable Helper
+# =============================================================================
+
+def env_bool(key: str, default: bool = False) -> bool:
+    """Parse environment variable as boolean.
+
+    Truthy values: "1", "true", "yes", "on" (case-insensitive)
+    Falsy values: "0", "false", "no", "off", "" (case-insensitive)
+
+    This unifies the inconsistent bool parsing across the codebase.
+    """
+    val = os.getenv(key, "").strip().lower()
+    if not val:
+        return default
+    return val in ("1", "true", "yes", "on")
+
 # =============================================================================
 # Connection Pool Management
 # =============================================================================
@@ -955,7 +973,7 @@ def get_historical_financials_facts(
     if not parsed:
         return []
     current_year, current_q = parsed
-    lookahead_assertions = os.getenv("LOOKAHEAD_ASSERTIONS", "1") == "1"
+    lookahead_assertions = env_bool("LOOKAHEAD_ASSERTIONS", default=True)
 
     with get_cursor() as cur:
         if cur is None:
@@ -1071,7 +1089,7 @@ def get_historical_earnings_facts(
 
     # Check if we should include post-earnings returns (default: NO to prevent lookahead)
     include_post_returns = os.getenv("HISTORICAL_EARNINGS_INCLUDE_POST_RETURNS", "0") == "1"
-    lookahead_assertions = os.getenv("LOOKAHEAD_ASSERTIONS", "1") == "1"
+    lookahead_assertions = env_bool("LOOKAHEAD_ASSERTIONS", default=True)
 
     with get_cursor() as cur:
         if cur is None:

@@ -11,6 +11,18 @@ from storage import get_fmp_cache, set_fmp_cache
 
 load_dotenv()
 
+
+def env_bool(key: str, default: bool = False) -> bool:
+    """Parse environment variable as boolean.
+
+    Truthy values: "1", "true", "yes", "on" (case-insensitive)
+    Falsy values: "0", "false", "no", "off", "" (case-insensitive)
+    """
+    val = os.getenv(key, "").strip().lower()
+    if not val:
+        return default
+    return val in ("1", "true", "yes", "on")
+
 # Import return horizon from centralized config
 RETURN_HORIZON_DAYS = int(os.getenv("RETURN_HORIZON_DAYS", "30"))
 
@@ -888,7 +900,7 @@ def _filter_financials_by_date(statements: List[Dict], before_date: str) -> List
         return statements
 
     filtered = []
-    lookahead_assertions = os.getenv("LOOKAHEAD_ASSERTIONS", "1") == "1"
+    lookahead_assertions = env_bool("LOOKAHEAD_ASSERTIONS", default=True)
 
     for stmt in statements:
         stmt_date = stmt.get("date") or stmt.get("fillingDate") or ""
