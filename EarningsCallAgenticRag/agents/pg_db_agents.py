@@ -383,6 +383,7 @@ class PgComparativeAgent(BasePgAgent):
         peers: list[str] | None = None,
         sector: str | None = None,
         top_k: int = 5,
+        as_of_date: str | None = None,  # Added for lookahead protection
     ) -> Optional[str]:
         """Compare facts with peer companies from PostgreSQL DB.
 
@@ -393,6 +394,7 @@ class PgComparativeAgent(BasePgAgent):
             peers: Optional list of peer tickers (not used currently)
             sector: Optional sector name
             top_k: Number of peers to fetch
+            as_of_date: Date cutoff for data (YYYY-MM-DD) to prevent lookahead
 
         Returns:
             Analysis text or None if insufficient data
@@ -410,7 +412,9 @@ class PgComparativeAgent(BasePgAgent):
         if not sector:
             return None
 
-        as_of_date = parse_quarter_to_date(quarter)
+        # Use provided as_of_date or fall back to quarter-derived date
+        if not as_of_date:
+            as_of_date = parse_quarter_to_date(quarter)
 
         # Get peer financials from PostgreSQL DB
         peer_data = get_peer_financials(sector, ticker, as_of_date, limit=top_k)
