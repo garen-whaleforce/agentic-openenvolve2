@@ -313,7 +313,16 @@ class ComparativeAgent:
         """Filter out results from future quarters to prevent lookahead bias.
 
         LOOKAHEAD PROTECTION: This ensures Neo4j fallback only returns data from
-        quarters <= current_quarter.
+        quarters STRICTLY BEFORE current_quarter (< not <=).
+
+        IMPORTANT: We use strict inequality (< current_quarter) because Neo4j facts
+        don't have transcript_date timestamps - only quarter labels. This means we
+        cannot distinguish between "early Q1" and "late Q1" events within the same
+        quarter. Using <= would allow "same-quarter lookahead" where facts from a
+        later earnings call in the same quarter could leak into an earlier one.
+
+        This is a conservative approach that sacrifices some same-quarter peer data
+        to eliminate the risk of intra-quarter lookahead bias.
         """
         if current_year is None or current_q is None:
             return results
@@ -331,11 +340,12 @@ class ComparativeAgent:
                 continue
             res_year = int(match.group(1))
             res_q = int(match.group(2))
-            # Only include if result quarter <= current quarter
-            if res_year < current_year or (res_year == current_year and res_q <= current_q):
+            # STRICT INEQUALITY: Only include if result quarter < current quarter
+            # This prevents same-quarter lookahead (e.g., late-Q1 data leaking into early-Q1 analysis)
+            if res_year < current_year or (res_year == current_year and res_q < current_q):
                 filtered.append(r)
             else:
-                logger.debug("Filtered out future quarter data: %s (current: %d-Q%d)", q_str, current_year, current_q)
+                logger.debug("Filtered out same/future quarter data: %s (current: %d-Q%d)", q_str, current_year, current_q)
         return filtered
 
     # ------------------------------------------------------------------

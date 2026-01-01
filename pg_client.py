@@ -823,14 +823,6 @@ def get_peer_facts_summary(
                 return []
             sector = row["sector"]
 
-            # Build date filter for income statements
-            date_filter = ""
-            params = [year, q, sector, symbol.upper()]
-
-            if as_of_date:
-                date_filter = "AND inc.date < %s"
-                params.insert(3, as_of_date)  # Insert before sector param
-
             # Get peer data with key financial metrics using DISTINCT ON for efficiency
             # NOTE: Removed return_20d to prevent lookahead bias when as_of_date is set
             # The post-earnings returns are only known after the fact
@@ -840,7 +832,7 @@ def get_peer_facts_summary(
 
             if include_post_returns:
                 # Live mode: include post-earnings returns for analysis
-                cur.execute(f"""
+                cur.execute("""
                     SELECT DISTINCT ON (c.symbol)
                         c.symbol, c.name, c.sector,
                         inc.revenue, inc.net_income, inc.eps,
@@ -858,6 +850,16 @@ def get_peer_facts_summary(
                 """, (year, q, sector, symbol.upper(), limit))
             else:
                 # Backtest mode: exclude post-earnings returns to prevent lookahead
+                # FIXED: Build SQL params correctly to avoid parameter order bugs
+                date_filter = ""
+                sql_params: list = [sector, symbol.upper()]
+
+                if as_of_date:
+                    date_filter = "AND inc.date < %s"
+                    sql_params.append(as_of_date)
+
+                sql_params.append(limit)
+
                 cur.execute(f"""
                     SELECT DISTINCT ON (c.symbol)
                         c.symbol, c.name, c.sector,
@@ -871,7 +873,7 @@ def get_peer_facts_summary(
                         {date_filter}
                     ORDER BY c.symbol, inc.date DESC
                     LIMIT %s
-                """, (*params[2:], limit) if as_of_date else (sector, symbol.upper(), limit))
+                """, tuple(sql_params))
 
             return [_serialize_row(dict(row)) for row in cur.fetchall()]
         except Exception as e:

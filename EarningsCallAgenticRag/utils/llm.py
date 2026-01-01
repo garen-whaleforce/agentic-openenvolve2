@@ -4,10 +4,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import random
 import time
 from pathlib import Path
-from typing import Dict, Tuple, Callable, TypeVar, Any
+from typing import Dict, Tuple, Callable, TypeVar, Any, List
 
 from langchain_openai import OpenAIEmbeddings, AzureOpenAIEmbeddings
 from openai import AzureOpenAI, OpenAI
@@ -15,6 +16,93 @@ from openai import AzureOpenAI, OpenAI
 DEFAULT_AZURE_VERSION = "2024-12-01-preview"
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# PROMPT LEAKAGE GATE - Runtime protection against lookahead bias
+# =============================================================================
+
+# Forbidden keywords that indicate prediction target leakage
+LEAKAGE_FORBIDDEN_KEYWORDS = [
+    # Direct prediction targets (T+N returns)
+    "pct_change_t_plus_30",
+    "pct_change_t_plus_20",
+    "pct_change_t_plus",
+    "return_30d",
+    "return_20d",
+    "post_earnings_return",
+    "actual_return",
+    # Evaluation metrics that should never be in prompts
+    r"Correct:\s*(True|False|Yes|No)",
+    r"Accuracy:\s*\d+",
+    r"Win Rate:\s*\d+",
+    # Target categories
+    "trend_category",
+]
+
+# Compile patterns for efficiency
+_LEAKAGE_PATTERNS = [
+    re.compile(kw, re.IGNORECASE) if any(c in kw for c in r"\.+*?[](){}|^$\\") else None
+    for kw in LEAKAGE_FORBIDDEN_KEYWORDS
+]
+
+
+class PromptLeakageError(Exception):
+    """Raised when a prompt contains forbidden keywords indicating data leakage."""
+    pass
+
+
+def check_prompt_leakage(prompt: str, context: str = "") -> None:
+    """
+    RUNTIME GUARD: Check if prompt/context contains forbidden keywords.
+
+    This is a last-line-of-defense to prevent prediction targets (T+30 returns,
+    correctness labels, etc.) from being sent to the LLM.
+
+    Args:
+        prompt: The prompt text being sent to LLM
+        context: Optional additional context (e.g., system message)
+
+    Raises:
+        PromptLeakageError: If forbidden keywords are found
+    """
+    # Skip check if disabled (for debugging only, never in production)
+    if os.environ.get("DISABLE_LEAKAGE_CHECK", "").lower() == "true":
+        return
+
+    combined = f"{prompt}\n{context}".lower()
+
+    for i, keyword in enumerate(LEAKAGE_FORBIDDEN_KEYWORDS):
+        pattern = _LEAKAGE_PATTERNS[i]
+        if pattern:
+            # Regex pattern
+            if pattern.search(combined):
+                raise PromptLeakageError(
+                    f"CRITICAL: Prompt contains forbidden pattern '{keyword}' - "
+                    f"possible prediction target leakage! This must be fixed."
+                )
+        else:
+            # Simple string match
+            if keyword.lower() in combined:
+                raise PromptLeakageError(
+                    f"CRITICAL: Prompt contains forbidden keyword '{keyword}' - "
+                    f"possible prediction target leakage! This must be fixed."
+                )
+
+
+def validate_messages_no_leakage(messages: List[Dict[str, str]]) -> None:
+    """
+    Validate that chat messages don't contain leakage keywords.
+
+    Args:
+        messages: List of message dicts with 'role' and 'content' keys
+
+    Raises:
+        PromptLeakageError: If forbidden keywords are found
+    """
+    for msg in messages:
+        content = msg.get("content", "")
+        if content:
+            check_prompt_leakage(content, context=f"role={msg.get('role', 'unknown')}")
 
 T = TypeVar("T")
 
