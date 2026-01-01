@@ -1,8 +1,8 @@
-# Lookahead Bias / Data Leakage Audit Report v2
+# Lookahead Bias / Data Leakage Audit Report v2.1
 
 **審計日期**: 2026-01-02
 **審計對象**: Long-only v1.1-live-safe 策略
-**審計結論**: **所有高嚴重度問題已修補**
+**審計結論**: **所有高嚴重度問題已修補（含 v2.1 新修補）**
 
 ---
 
@@ -18,6 +18,8 @@
 | `get_peer_facts_summary()` | **🟢 已修** | ✅ 完成 | as_of_date 通過整個 agent chain |
 | 環境變數 bool parsing | **🟢 已修** | ✅ 完成 | 統一 env_bool() 函數 |
 | Prompt 掃描測試 | **🟢 新增** | ✅ 完成 | validate_prompt_no_leakage.py |
+| `orchestrator_parallel_facts.py` memory | **🟢 已修 v2.1** | ✅ 完成 | 禁用 mem_block 注入 actual_return |
+| `ComparativeAgent` Neo4j fallback | **🟢 已修 v2.1** | ✅ 完成 | 新增 `_filter_future_quarters()` |
 
 ---
 
@@ -169,6 +171,49 @@ cache_key = f"call:{CALL_CACHE_VERSION}:{symbol.upper()}:{year}:Q{quarter}"
 
 ---
 
+## v2.1 新增修補
+
+### 5. orchestrator_parallel_facts.py Memory Injection 禁用
+
+**問題 (HIGH RISK)**: `orchestrator_parallel_facts.py` 第 899-915 行將 `actual_return`（T+30 回報，即預測目標）注入到 `mem_block` 中，送給 LLM。
+
+**修補**:
+完全禁用 mem_block 注入，防止任何 label leakage：
+
+```python
+# LOOKAHEAD PROTECTION: Disabled memory injection to prevent label leakage
+# The old code injected actual_return (the prediction target) into the LLM prompt.
+# This was a critical lookahead bias - the model could see future returns.
+mem_block = None
+# WARNING: Do NOT re-enable the following code without careful review!
+```
+
+---
+
+### 6. ComparativeAgent Neo4j Fallback Quarter Filter
+
+**問題 (HIGH RISK)**: 當 PostgreSQL 無資料時，fallback 到 Neo4j 向量搜尋，但搜尋結果沒有限制 quarter，可能返回未來季度的同業資料。
+
+**修補**:
+1. `_search_similar()` 新增 `current_quarter` 參數
+2. 新增 `_filter_future_quarters()` 方法過濾未來季度資料
+3. 所有 Neo4j 搜尋結果都經過 quarter filter
+
+```python
+def _filter_future_quarters(
+    self,
+    results: List[Dict[str, Any]],
+    current_year: int | None,
+    current_q: int | None,
+) -> List[Dict[str, Any]]:
+    """Filter out results from future quarters to prevent lookahead bias."""
+    # Only include if result quarter <= current quarter
+    if res_year < current_year or (res_year == current_year and res_q <= current_q):
+        filtered.append(r)
+```
+
+---
+
 ## 結論
 
 **所有已知的 Lookahead Bias 問題已修補完成**。
@@ -178,6 +223,8 @@ cache_key = f"call:{CALL_CACHE_VERSION}:{symbol.upper()}:{year}:Q{quarter}"
 2. ✅ 環境變數 bool parsing: 統一 env_bool() 函數
 3. ✅ 目標欄位隔離: 確認不會進入 LLM prompt
 4. ✅ Prompt 掃描測試: 新增 forbidden keyword 驗證
+5. ✅ **v2.1 新增**: orchestrator memory injection 禁用
+6. ✅ **v2.1 新增**: Neo4j fallback quarter filter
 
 建議:
 1. 持續使用 `LOOKAHEAD_ASSERTIONS=true` 進行回測
@@ -187,5 +234,5 @@ cache_key = f"call:{CALL_CACHE_VERSION}:{symbol.upper()}:{year}:Q{quarter}"
 ---
 
 *報告產生者: Claude Code Audit*
-*審計版本: v2.0*
+*審計版本: v2.1*
 *修補 Commit: 待推送*

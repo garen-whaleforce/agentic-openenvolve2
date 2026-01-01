@@ -172,13 +172,26 @@ class ComparativeAgent:
         ticker: str | None = None,
         peers: Sequence[str] | None = None,
         use_batch_peer_query: bool = False,
+        current_quarter: str | None = None,  # Added for lookahead protection
     ) -> List[Dict[str, Any]]:
         """
         If sector_map is provided, run the query for every ticker in the same sector (excluding exclude_ticker).
         If sector is not provided, infer it from ticker using the sector_map.
         Otherwise, default to original behavior.
         If use_batch_peer_query is True, use a single query with IN $peer_ticker_list.
+
+        LOOKAHEAD PROTECTION: If current_quarter is provided (e.g., "2024-Q1"), filter out
+        results from future quarters to prevent data leakage.
         """
+        # Parse current_quarter for lookahead filtering
+        current_year, current_q = None, None
+        if current_quarter:
+            import re
+            match = re.match(r"(\d{4})-?Q?(\d)", current_quarter)
+            if match:
+                current_year = int(match.group(1))
+                current_q = int(match.group(2))
+
         tickers_in_sector = None
         exclude_upper = exclude_ticker.upper()
         if self.sector_map:
@@ -245,7 +258,8 @@ class ComparativeAgent:
                             )
                             all_results.extend([dict(r) for r in res])
                     all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
-                    return all_results
+                    # LOOKAHEAD PROTECTION: Filter out future quarters
+                    return self._filter_future_quarters(all_results, current_year, current_q)
 
                 if tickers_in_sector:
                     # Always use batch query for sector-based searches to avoid N individual queries
@@ -266,7 +280,8 @@ class ComparativeAgent:
                     )
                     all_results.extend([dict(r) for r in res])
                     all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
-                    return all_results
+                    # LOOKAHEAD PROTECTION: Filter out future quarters
+                    return self._filter_future_quarters(all_results, current_year, current_q)
 
                 else:
                     res = ses.run(
@@ -284,9 +299,44 @@ class ComparativeAgent:
                         """,
                         {"topK": top_k, "vec": vec, "exclude_ticker": exclude_upper, "min_score": MIN_SIMILARITY_SCORE},
                     )
-                return [dict(r) for r in res]
+                # LOOKAHEAD PROTECTION: Filter out future quarters
+                return self._filter_future_quarters([dict(r) for r in res], current_year, current_q)
         except Exception:
             return []
+
+    def _filter_future_quarters(
+        self,
+        results: List[Dict[str, Any]],
+        current_year: int | None,
+        current_q: int | None,
+    ) -> List[Dict[str, Any]]:
+        """Filter out results from future quarters to prevent lookahead bias.
+
+        LOOKAHEAD PROTECTION: This ensures Neo4j fallback only returns data from
+        quarters <= current_quarter.
+        """
+        if current_year is None or current_q is None:
+            return results
+
+        filtered = []
+        import re
+        for r in results:
+            q_str = r.get("quarter", "")
+            if not q_str:
+                # No quarter info, skip this result to be safe
+                continue
+            match = re.match(r"(\d{4})-?Q?(\d)", str(q_str))
+            if not match:
+                # Can't parse quarter, skip to be safe
+                continue
+            res_year = int(match.group(1))
+            res_q = int(match.group(2))
+            # Only include if result quarter <= current quarter
+            if res_year < current_year or (res_year == current_year and res_q <= current_q):
+                filtered.append(r)
+            else:
+                logger.debug("Filtered out future quarter data: %s (current: %d-Q%d)", q_str, current_year, current_q)
+        return filtered
 
     # ------------------------------------------------------------------
     # Vector search helper for sector peers
@@ -365,6 +415,7 @@ class ComparativeAgent:
                     sector=sector,
                     peers=peers,
                     use_batch_peer_query=bool(peers),
+                    current_quarter=quarter,  # LOOKAHEAD PROTECTION: Pass quarter for filtering
                 )
                 # Optionally, attach the current metric for context
                 for sim in similar:

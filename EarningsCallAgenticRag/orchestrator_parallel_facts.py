@@ -896,23 +896,15 @@ def process_sector(sector_df: pd.DataFrame, log_path: str = None) -> List[dict]:
                     pd.DataFrame([result_dict]).to_csv(log_path, mode="a", header=False, index=False)
                     continue
 
+                # LOOKAHEAD PROTECTION: Disabled memory injection to prevent label leakage
+                # The old code injected actual_return (the prediction target) into the LLM prompt.
+                # This was a critical lookahead bias - the model could see future returns.
+                # mem_block is now always None to prevent any label leakage.
                 mem_block = None
-                if not processed_history.empty and (processed_history["ticker"] == ticker).any():
-                    quarter_col = "quarter" if "quarter" in processed_history.columns else "q"
-                    ticker_history = processed_history[processed_history["ticker"] == ticker]
-                    lines = ["Previously, you have made the following analysis on the firm in the past quarter:"]
-                    for r in memories_for(ticker_history):
-                        research_note = str(r.get('research_note', ''))
-                        match = re.search(r"(\*\*Summary:.*?Direction\s*:\s*\d{1,2}\*\*)", research_note, re.DOTALL)
-                        if match:
-                            summary_text = match.group(1).strip().replace('\n', ' ')
-                            quarter_key = 'quarter' if 'quarter' in r else 'q'
-                            lines.append(
-                                f"- {r[quarter_key]}:  {summary_text} "
-                                f"(Following your prediction, the firm realised a {RETURN_HORIZON_DAYS}-day return of {r['actual_return']:+.2%})"
-                            )
-                    if len(lines) > 1:
-                        mem_block = "\n".join(lines)
+                # WARNING: Do NOT re-enable the following code without careful review!
+                # It contains actual_return which is the prediction target (T+30 return).
+                # if not processed_history.empty and (processed_history["ticker"] == ticker).any():
+                #     ... this code leaked actual_return to the LLM ...
 
                 # --- Use cached statement data ---
                 statement_data = get_statement(ticker)
