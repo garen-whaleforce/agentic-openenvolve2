@@ -452,10 +452,22 @@ def get_cash_flow_statements(symbol: str, limit: int = 4) -> List[Dict[str, Any]
     return _get_financial_statements("cash_flow_statements", symbol, limit)
 
 
-def get_quarterly_financials(symbol: str, limit: int = 4) -> Optional[Dict]:
-    """Get all three financial statements."""
+def get_quarterly_financials(symbol: str, limit: int = 4, before_date: Optional[str] = None) -> Optional[Dict]:
+    """
+    Get all three financial statements.
+
+    Args:
+        symbol: Stock ticker symbol
+        limit: Number of quarters to retrieve
+        before_date: Optional as-of date (YYYY-MM-DD). If provided, only returns
+                     statements with date < before_date to prevent lookahead bias.
+    """
     if not symbol:
         return None
+
+    # If before_date is provided, use get_historical_financials for lookahead safety
+    if before_date:
+        return get_historical_financials(symbol, before_date, limit)
 
     income = get_income_statements(symbol, limit)
     balance = get_balance_sheets(symbol, limit)
@@ -755,8 +767,23 @@ def get_peer_transcripts(symbol: str, quarter: str, limit: int = 5) -> List[Dict
     return []
 
 
-def get_peer_facts_summary(symbol: str, quarter: str, limit: int = 5) -> List[Dict[str, Any]]:
-    """Get summarized peer data combining transcripts and key financials."""
+def get_peer_facts_summary(
+    symbol: str,
+    quarter: str,
+    limit: int = 5,
+    as_of_date: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Get summarized peer data combining transcripts and key financials.
+
+    Args:
+        symbol: Stock ticker to find peers for
+        quarter: Quarter string (e.g., "2024Q1")
+        limit: Maximum number of peers to return
+        as_of_date: Optional as-of date (YYYY-MM-DD). If provided, only returns
+                    financial data with date < as_of_date to prevent lookahead bias.
+                    Also excludes post-earnings returns (T+20, T+30) for safety.
+    """
     if not symbol:
         return []
 
@@ -778,23 +805,55 @@ def get_peer_facts_summary(symbol: str, quarter: str, limit: int = 5) -> List[Di
                 return []
             sector = row["sector"]
 
+            # Build date filter for income statements
+            date_filter = ""
+            params = [year, q, sector, symbol.upper()]
+
+            if as_of_date:
+                date_filter = "AND inc.date < %s"
+                params.insert(3, as_of_date)  # Insert before sector param
+
             # Get peer data with key financial metrics using DISTINCT ON for efficiency
-            cur.execute("""
-                SELECT DISTINCT ON (c.symbol)
-                    c.symbol, c.name, c.sector,
-                    inc.revenue, inc.net_income, inc.eps,
-                    inc.revenue_growth, inc.operating_income,
-                    pa.pct_change_t as earnings_day_return,
-                    pa.pct_change_t_plus_20 as return_20d
-                FROM companies c
-                LEFT JOIN income_statements inc ON c.symbol = inc.symbol
-                LEFT JOIN earnings_transcripts et ON c.symbol = et.symbol
-                    AND et.year = %s AND et.quarter = %s
-                LEFT JOIN price_analysis pa ON et.id = pa.transcript_id
-                WHERE c.sector = %s AND UPPER(c.symbol) != %s
-                ORDER BY c.symbol, inc.date DESC
-                LIMIT %s
-            """, (year, q, sector, symbol.upper(), limit))
+            # NOTE: Removed return_20d to prevent lookahead bias when as_of_date is set
+            # The post-earnings returns are only known after the fact
+            include_post_returns = not as_of_date and os.environ.get(
+                "HISTORICAL_EARNINGS_INCLUDE_POST_RETURNS", "false"
+            ).lower() == "true"
+
+            if include_post_returns:
+                # Live mode: include post-earnings returns for analysis
+                cur.execute(f"""
+                    SELECT DISTINCT ON (c.symbol)
+                        c.symbol, c.name, c.sector,
+                        inc.revenue, inc.net_income, inc.eps,
+                        inc.revenue_growth, inc.operating_income,
+                        pa.pct_change_t as earnings_day_return,
+                        pa.pct_change_t_plus_20 as return_20d
+                    FROM companies c
+                    LEFT JOIN income_statements inc ON c.symbol = inc.symbol
+                    LEFT JOIN earnings_transcripts et ON c.symbol = et.symbol
+                        AND et.year = %s AND et.quarter = %s
+                    LEFT JOIN price_analysis pa ON et.id = pa.transcript_id
+                    WHERE c.sector = %s AND UPPER(c.symbol) != %s
+                    ORDER BY c.symbol, inc.date DESC
+                    LIMIT %s
+                """, (year, q, sector, symbol.upper(), limit))
+            else:
+                # Backtest mode: exclude post-earnings returns to prevent lookahead
+                cur.execute(f"""
+                    SELECT DISTINCT ON (c.symbol)
+                        c.symbol, c.name, c.sector,
+                        inc.revenue, inc.net_income, inc.eps,
+                        inc.revenue_growth, inc.operating_income,
+                        inc.date as financial_date
+                    FROM companies c
+                    LEFT JOIN income_statements inc ON c.symbol = inc.symbol
+                    WHERE c.sector = %s
+                        AND UPPER(c.symbol) != %s
+                        {date_filter}
+                    ORDER BY c.symbol, inc.date DESC
+                    LIMIT %s
+                """, (*params[2:], limit) if as_of_date else (sector, symbol.upper(), limit))
 
             return [_serialize_row(dict(row)) for row in cur.fetchall()]
         except Exception as e:
@@ -876,28 +935,59 @@ def get_market_timing(symbol: str, year: int, quarter: int) -> Optional[str]:
 def get_historical_financials_facts(
     symbol: str,
     current_quarter: str,
-    num_quarters: int = 8
+    num_quarters: int = 8,
+    as_of_date: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    """Get historical financial data formatted as facts for LLM comparison."""
+    """
+    Get historical financial data formatted as facts for LLM comparison.
+
+    IMPORTANT: This function enforces strict time boundaries to prevent lookahead bias.
+    Only returns financial statements from quarters STRICTLY BEFORE the current_quarter.
+
+    Args:
+        symbol: Stock ticker
+        current_quarter: Current quarter being analyzed (e.g., "2017-Q1")
+        num_quarters: Number of historical quarters to fetch
+        as_of_date: Optional date cutoff (YYYY-MM-DD). If provided, only returns
+                    statements with date < as_of_date. Used for backtesting.
+    """
     parsed = parse_quarter(current_quarter)
     if not parsed:
         return []
     current_year, current_q = parsed
+    lookahead_assertions = os.getenv("LOOKAHEAD_ASSERTIONS", "1") == "1"
 
     with get_cursor() as cur:
         if cur is None:
             return []
         try:
-            cur.execute("""
-                SELECT
-                    inc.date, inc.period,
-                    inc.revenue, inc.net_income, inc.eps, inc.ebitda,
-                    inc.revenue_growth, inc.gross_profit, inc.operating_income
-                FROM income_statements inc
-                WHERE UPPER(inc.symbol) = %s
-                ORDER BY inc.date DESC
-                LIMIT %s
-            """, (symbol.upper(), num_quarters + 2))
+            # FIXED: Add strict time boundary in SQL to prevent lookahead
+            # Old buggy code: ORDER BY inc.date DESC with only Python-side filtering
+            # This would fetch 2024/2025 data when backtesting 2017!
+            if as_of_date:
+                cur.execute("""
+                    SELECT
+                        inc.date, inc.period, inc.fiscal_year,
+                        inc.revenue, inc.net_income, inc.eps, inc.ebitda,
+                        inc.revenue_growth, inc.gross_profit, inc.operating_income
+                    FROM income_statements inc
+                    WHERE UPPER(inc.symbol) = %s
+                        AND inc.date < %s
+                    ORDER BY inc.date DESC
+                    LIMIT %s
+                """, (symbol.upper(), as_of_date, num_quarters + 2))
+            else:
+                # Fallback: Use fiscal year/quarter boundary
+                cur.execute("""
+                    SELECT
+                        inc.date, inc.period, inc.fiscal_year,
+                        inc.revenue, inc.net_income, inc.eps, inc.ebitda,
+                        inc.revenue_growth, inc.gross_profit, inc.operating_income
+                    FROM income_statements inc
+                    WHERE UPPER(inc.symbol) = %s
+                    ORDER BY inc.date DESC
+                    LIMIT %s
+                """, (symbol.upper(), num_quarters + 2))
 
             facts = []
             for row in cur.fetchall():
@@ -911,8 +1001,15 @@ def get_historical_financials_facts(
                         q = (month - 1) // 3 + 1
                         quarter = f"{year}-Q{q}"
 
-                        # Skip current quarter
-                        if year == current_year and q == current_q:
+                        # FIXED: Skip current quarter AND all future quarters
+                        # Old code only skipped current quarter exactly
+                        if year > current_year or (year == current_year and q >= current_q):
+                            # LOOKAHEAD GUARD: Log and skip future data
+                            if lookahead_assertions and (year > current_year or (year == current_year and q > current_q)):
+                                logger.warning(
+                                    f"LOOKAHEAD_GUARD: Skipping future financial data for {symbol}: "
+                                    f"current={current_year}Q{current_q}, got={year}Q{q}"
+                                )
                             continue
 
                         # Add facts
@@ -957,16 +1054,32 @@ def get_historical_earnings_facts(
     current_quarter: str,
     num_quarters: int = 8
 ) -> List[Dict[str, Any]]:
-    """Get historical earnings data formatted as facts for LLM comparison."""
+    """
+    Get historical earnings data formatted as facts for LLM comparison.
+
+    IMPORTANT: This function enforces strict time boundaries to prevent lookahead bias.
+    Only returns data from quarters STRICTLY BEFORE the current_quarter.
+
+    By default, post-earnings returns (T+20, T+30) are NOT included to avoid
+    leaking prediction targets. Set HISTORICAL_EARNINGS_INCLUDE_POST_RETURNS=1
+    to enable them (only for research/debugging, NOT for backtesting).
+    """
     parsed = parse_quarter(current_quarter)
     if not parsed:
         return []
     current_year, current_q = parsed
 
+    # Check if we should include post-earnings returns (default: NO to prevent lookahead)
+    include_post_returns = os.getenv("HISTORICAL_EARNINGS_INCLUDE_POST_RETURNS", "0") == "1"
+    lookahead_assertions = os.getenv("LOOKAHEAD_ASSERTIONS", "1") == "1"
+
     with get_cursor() as cur:
         if cur is None:
             return []
         try:
+            # FIXED: Use strict time boundary - only quarters BEFORE current
+            # Old buggy code: AND NOT (et.year = %s AND et.quarter = %s)
+            # This would include FUTURE quarters!
             cur.execute("""
                 SELECT
                     et.year, et.quarter, et.transcript_date_str,
@@ -978,16 +1091,28 @@ def get_historical_earnings_facts(
                 FROM earnings_transcripts et
                 LEFT JOIN price_analysis pa ON et.id = pa.transcript_id
                 WHERE UPPER(et.symbol) = %s
-                    AND NOT (et.year = %s AND et.quarter = %s)
+                    AND (et.year < %s OR (et.year = %s AND et.quarter < %s))
                 ORDER BY et.year DESC, et.quarter DESC
                 LIMIT %s
-            """, (symbol.upper(), current_year, current_q, num_quarters))
+            """, (symbol.upper(), current_year, current_year, current_q, num_quarters))
 
             facts = []
             for row in cur.fetchall():
                 row_dict = _serialize_row(dict(row))
-                quarter = f"{row_dict['year']}-Q{row_dict['quarter']}"
+                row_year = row_dict.get('year')
+                row_q = row_dict.get('quarter')
+                quarter = f"{row_year}-Q{row_q}"
 
+                # LOOKAHEAD GUARD: Fail fast if we somehow got future data
+                if lookahead_assertions:
+                    if row_year is not None and row_q is not None:
+                        if row_year > current_year or (row_year == current_year and row_q >= current_q):
+                            raise RuntimeError(
+                                f"LOOKAHEAD_GUARD: get_historical_earnings_facts returned future data! "
+                                f"current={current_year}Q{current_q}, got={row_year}Q{row_q}"
+                            )
+
+                # Earnings day return is safe to include (it's from the past quarter's earnings day)
                 if row_dict.get("earnings_day_return") is not None:
                     facts.append({
                         "metric": "Earnings Day Return",
@@ -997,24 +1122,28 @@ def get_historical_earnings_facts(
                         "ticker": symbol.upper(),
                         "type": "Result",
                     })
-                if row_dict.get("return_30d") is not None:
-                    facts.append({
-                        "metric": "30-Day Post-Earnings Return",
-                        "value": f"{row_dict['return_30d']:.2f}%",
-                        "reason": "Price movement 30 days after earnings",
-                        "quarter": quarter,
-                        "ticker": symbol.upper(),
-                        "type": "Result",
-                    })
-                if row_dict.get("trend_category"):
-                    facts.append({
-                        "metric": "Post-Earnings Trend",
-                        "value": row_dict["trend_category"],
-                        "reason": "Classified trend pattern after earnings",
-                        "quarter": quarter,
-                        "ticker": symbol.upper(),
-                        "type": "Result",
-                    })
+
+                # DANGER: T+20 and T+30 returns are prediction targets!
+                # Only include if explicitly enabled (NOT recommended for backtesting)
+                if include_post_returns:
+                    if row_dict.get("return_30d") is not None:
+                        facts.append({
+                            "metric": "30-Day Post-Earnings Return",
+                            "value": f"{row_dict['return_30d']:.2f}%",
+                            "reason": "[CAUTION: Post-hoc data] Price movement 30 days after earnings",
+                            "quarter": quarter,
+                            "ticker": symbol.upper(),
+                            "type": "Result",
+                        })
+                    if row_dict.get("trend_category"):
+                        facts.append({
+                            "metric": "Post-Earnings Trend",
+                            "value": row_dict["trend_category"],
+                            "reason": "[CAUTION: Post-hoc data] Classified trend pattern after earnings",
+                            "quarter": quarter,
+                            "ticker": symbol.upper(),
+                            "type": "Result",
+                        })
 
             return facts
         except Exception as e:

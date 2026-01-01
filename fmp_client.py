@@ -879,29 +879,65 @@ async def _get_transcript_async(symbol: str, year: int, quarter: int, max_retrie
     raise NoTranscriptError(f"No transcript available for {symbol} FY{year} Q{quarter}")
 
 
-def get_quarterly_financials(symbol: str, limit: int = 4) -> Dict:
+def _filter_financials_by_date(statements: List[Dict], before_date: str) -> List[Dict]:
     """
-    Fetch recent quarterly financial statements.
-    Checks AWS FMP DB first, then falls back to FMP API.
+    Filter financial statements to only include those with date < before_date.
+    Used to prevent lookahead bias in backtesting.
+    """
+    if not statements or not before_date:
+        return statements
+
+    filtered = []
+    lookahead_assertions = os.getenv("LOOKAHEAD_ASSERTIONS", "1") == "1"
+
+    for stmt in statements:
+        stmt_date = stmt.get("date") or stmt.get("fillingDate") or ""
+        if stmt_date and stmt_date[:10] < before_date[:10]:
+            filtered.append(stmt)
+        elif lookahead_assertions and stmt_date:
+            logger.warning(
+                f"LOOKAHEAD_GUARD: Filtering out future financial statement: "
+                f"stmt_date={stmt_date}, before_date={before_date}"
+            )
+
+    return filtered
+
+
+def get_quarterly_financials(symbol: str, limit: int = 4, before_date: Optional[str] = None) -> Dict:
+    """
+    Fetch quarterly financial statements.
+
+    IMPORTANT: For backtesting, always provide before_date (typically transcript_date)
+    to prevent lookahead bias. Without before_date, this function returns the most
+    recent statements which would leak future data in historical backtests.
+
+    Args:
+        symbol: Stock ticker
+        limit: Number of quarters to fetch
+        before_date: Optional date cutoff (YYYY-MM-DD). Only returns statements
+                     filed before this date. REQUIRED for backtesting.
     """
     # Try AWS FMP DB first
     if FMP_DB_ENABLED:
         try:
-            aws_fin = pg_client.get_quarterly_financials(symbol, limit)
+            aws_fin = pg_client.get_quarterly_financials(symbol, limit, before_date=before_date)
             if aws_fin and (aws_fin.get("income") or aws_fin.get("balance") or aws_fin.get("cashFlow")):
-                logger.debug("Financials for %s found in AWS FMP DB", symbol)
+                logger.debug("Financials for %s found in AWS FMP DB (before_date=%s)", symbol, before_date)
                 return aws_fin
         except Exception as e:
             logger.debug("AWS FMP DB financials lookup failed: %s", e)
 
     _require_api_key()
     cache_ttl = int(os.getenv("FIN_CACHE_MIN", "1440"))
-    cache_key = f"fmp:financials:{symbol.upper()}:{limit}"
+    # Include before_date in cache key to avoid mixing filtered/unfiltered results
+    cache_key = f"fmp:financials:{symbol.upper()}:{limit}:{before_date or 'latest'}"
     cached = get_fmp_cache(cache_key, max_age_minutes=cache_ttl)
     if cached:
         return cached
 
-    params = {"symbol": symbol, "period": "quarter", "limit": limit, "apikey": FMP_API_KEY}
+    # FMP API doesn't support server-side date filtering, so we over-fetch and filter client-side
+    fetch_limit = limit + 8 if before_date else limit  # Fetch extra to account for filtering
+    params = {"symbol": symbol, "period": "quarter", "limit": fetch_limit, "apikey": FMP_API_KEY}
     client = _get_client()
     income = _get(client, "income-statement", params=params)
     balance = _get(client, "balance-sheet-statement", params=params)
@@ -911,37 +947,54 @@ def get_quarterly_financials(symbol: str, limit: int = 4) -> Dict:
     balance.raise_for_status()
     cash_flow.raise_for_status()
 
+    income_data = income.json() or []
+    balance_data = balance.json() or []
+    cash_flow_data = cash_flow.json() or []
+
+    # CRITICAL: Filter by date to prevent lookahead bias
+    if before_date:
+        income_data = _filter_financials_by_date(income_data, before_date)[:limit]
+        balance_data = _filter_financials_by_date(balance_data, before_date)[:limit]
+        cash_flow_data = _filter_financials_by_date(cash_flow_data, before_date)[:limit]
+
     out = {
-        "income": income.json() or [],
-        "balance": balance.json() or [],
-        "cashFlow": cash_flow.json() or [],
+        "income": income_data,
+        "balance": balance_data,
+        "cashFlow": cash_flow_data,
     }
     set_fmp_cache(cache_key, out)
     return out
 
 
-async def _get_quarterly_financials_async(symbol: str, limit: int = 4) -> Dict:
+async def _get_quarterly_financials_async(symbol: str, limit: int = 4, before_date: Optional[str] = None) -> Dict:
     """
     Async financial statements fetch with cache.
+
+    Args:
+        symbol: Stock ticker
+        limit: Number of quarters to fetch
+        before_date: Optional date cutoff (YYYY-MM-DD) to prevent lookahead bias.
     """
     # Try AWS FMP DB first
     if FMP_DB_ENABLED:
         try:
-            aws_fin = await asyncio.to_thread(pg_client.get_quarterly_financials, symbol, limit)
+            aws_fin = await asyncio.to_thread(pg_client.get_quarterly_financials, symbol, limit, before_date)
             if aws_fin and (aws_fin.get("income") or aws_fin.get("balance") or aws_fin.get("cashFlow")):
-                logger.debug("Async financials for %s found in AWS FMP DB", symbol)
+                logger.debug("Async financials for %s found in AWS FMP DB (before_date=%s)", symbol, before_date)
                 return aws_fin
         except Exception as e:
             logger.debug("AWS FMP DB async financials lookup failed: %s", e)
 
     _require_api_key()
     cache_ttl = int(os.getenv("FIN_CACHE_MIN", "1440"))
-    cache_key = f"fmp:financials:{symbol.upper()}:{limit}"
+    cache_key = f"fmp:financials:{symbol.upper()}:{limit}:{before_date or 'latest'}"
     cached = get_fmp_cache(cache_key, max_age_minutes=cache_ttl)
     if cached:
         return cached
 
-    params = {"symbol": symbol, "period": "quarter", "limit": limit, "apikey": FMP_API_KEY}
+    # FMP API doesn't support server-side date filtering
+    fetch_limit = limit + 8 if before_date else limit
+    params = {"symbol": symbol, "period": "quarter", "limit": fetch_limit, "apikey": FMP_API_KEY}
     client = _get_async_client()
     income, balance, cash_flow = await asyncio.gather(
         _aget(client, "income-statement", params=params),
@@ -949,10 +1002,20 @@ async def _get_quarterly_financials_async(symbol: str, limit: int = 4) -> Dict:
         _aget(client, "cash-flow-statement", params=params),
     )
 
+    income_data = income.json() or []
+    balance_data = balance.json() or []
+    cash_flow_data = cash_flow.json() or []
+
+    # CRITICAL: Filter by date to prevent lookahead bias
+    if before_date:
+        income_data = _filter_financials_by_date(income_data, before_date)[:limit]
+        balance_data = _filter_financials_by_date(balance_data, before_date)[:limit]
+        cash_flow_data = _filter_financials_by_date(cash_flow_data, before_date)[:limit]
+
     out = {
-        "income": income.json() or [],
-        "balance": balance.json() or [],
-        "cashFlow": cash_flow.json() or [],
+        "income": income_data,
+        "balance": balance_data,
+        "cashFlow": cash_flow_data,
     }
     set_fmp_cache(cache_key, out)
     return out
@@ -961,10 +1024,18 @@ async def _get_quarterly_financials_async(symbol: str, limit: int = 4) -> Dict:
 def get_earnings_context(symbol: str, year: int, quarter: int) -> Dict:
     """
     Aggregate transcript and financials into a single context used by the analysis engine.
+
+    IMPORTANT: This function now uses transcript_date as the as-of date for financials
+    to prevent lookahead bias in backtesting.
     """
     profile = get_company_profile(symbol)
     transcript = get_transcript(symbol, year, quarter)
-    financials = get_quarterly_financials(symbol, limit=4)
+
+    # CRITICAL FIX: Use transcript_date as the cutoff for financials
+    # This prevents lookahead bias when backtesting historical quarters
+    transcript_date = transcript.get("date")
+    before_date = transcript_date[:10] if transcript_date else None
+    financials = get_quarterly_financials(symbol, limit=4, before_date=before_date)
 
     # TODO: Incorporate historical price context via FMP price APIs.
     price_window = []
@@ -996,18 +1067,29 @@ def get_earnings_context(symbol: str, year: int, quarter: int) -> Dict:
         "price_window": price_window,
         "post_earnings_return": post_earnings_return,
         "post_return_meta": post_earnings,
+        "financials_as_of_date": before_date,  # Track for audit purposes
     }
 
 
 async def get_earnings_context_async(symbol: str, year: int, quarter: int) -> Dict:
     """
     Async version: fetch profile/transcript/financials in parallel, then compute post-return in a thread.
+
+    IMPORTANT: This function now uses transcript_date as the as-of date for financials
+    to prevent lookahead bias in backtesting.
     """
+    # First get transcript to determine the as-of date
     profile_task = asyncio.create_task(_get_company_profile_async(symbol))
     transcript_task = asyncio.create_task(_get_transcript_async(symbol, year, quarter))
-    financials_task = asyncio.create_task(_get_quarterly_financials_async(symbol, limit=4))
 
-    profile, transcript, financials = await asyncio.gather(profile_task, transcript_task, financials_task)
+    profile, transcript = await asyncio.gather(profile_task, transcript_task)
+
+    # CRITICAL FIX: Use transcript_date as the cutoff for financials
+    transcript_date = transcript.get("date")
+    before_date = transcript_date[:10] if transcript_date else None
+
+    # Now fetch financials with the correct as-of date
+    financials = await _get_quarterly_financials_async(symbol, limit=4, before_date=before_date)
 
     # post-return uses sync httpx client; move to thread
     post_earnings = await asyncio.to_thread(compute_post_return, symbol, transcript.get("date") or "", RETURN_HORIZON_DAYS)

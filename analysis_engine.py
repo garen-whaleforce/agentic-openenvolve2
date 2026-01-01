@@ -56,6 +56,11 @@ from services.backtester_client import BacktesterClient, get_backtester_client
 PAYLOAD_CACHE_MINUTES = int(os.getenv("PAYLOAD_CACHE_MINUTES", "1440"))  # DB cache validity in minutes (default 1 day)
 REDIS_PAYLOAD_TTL_SECONDS = int(os.getenv("REDIS_PAYLOAD_TTL_SECONDS", "3600"))  # Redis TTL in seconds (default 1 hour)
 
+# Cache Versioning - Increment when data pipeline logic changes to invalidate old cache
+# v1.0: Initial version
+# v2.0: 2026-01-01 - Fixed lookahead bias in historical earnings/financials queries
+CALL_CACHE_VERSION = os.getenv("CALL_CACHE_VERSION", "v2.0")
+
 # Feature flags for service integrations
 ENABLE_PERFORMANCE_METRICS = os.getenv("ENABLE_PERFORMANCE_METRICS", "true").lower() == "true"
 ENABLE_BACKTESTER_VALIDATION = os.getenv("ENABLE_BACKTESTER_VALIDATION", "true").lower() == "true"
@@ -306,7 +311,8 @@ async def analyze_earnings_async(
     """
     Async wrapper: fetch context in parallel and run agentic pipeline in thread to avoid blocking event loop.
     """
-    cache_key = f"call:{symbol.upper()}:{year}:Q{quarter}"
+    # Include cache version in key to invalidate old cache when logic changes
+    cache_key = f"call:{CALL_CACHE_VERSION}:{symbol.upper()}:{year}:Q{quarter}"
 
     if not skip_cache:
         # 1) Redis cache
