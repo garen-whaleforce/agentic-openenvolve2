@@ -1093,6 +1093,16 @@ def get_historical_earnings_facts(
     include_post_returns = os.getenv("HISTORICAL_EARNINGS_INCLUDE_POST_RETURNS", "0") == "1"
     lookahead_assertions = env_bool("LOOKAHEAD_ASSERTIONS", default=True)
 
+    # LOOKAHEAD PROTECTION: Force-disable post-returns when in backtest/live-safe mode
+    # This prevents accidental label leakage even if someone enables the flag
+    if lookahead_assertions and include_post_returns:
+        logger.warning(
+            "LOOKAHEAD_PROTECTION: HISTORICAL_EARNINGS_INCLUDE_POST_RETURNS=1 is IGNORED "
+            "because LOOKAHEAD_ASSERTIONS is enabled. Post-earnings returns (T+20, T+30) "
+            "are prediction targets and MUST NOT be included in backtest mode."
+        )
+        include_post_returns = False
+
     with get_cursor() as cur:
         if cur is None:
             return []

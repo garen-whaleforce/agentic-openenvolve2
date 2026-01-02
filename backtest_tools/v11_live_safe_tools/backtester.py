@@ -132,7 +132,10 @@ def run_backtest(
     # Determine all candidate trades (after CAP, but before price lookup we need dates).
     accepted_rows = []
     cap_counter: Dict[Tuple[int, int], int] = {}
-    held_symbols: set = set()
+    # FIX: Changed from global set to per-quarter set to allow same symbol trading across quarters
+    # Previously: held_symbols: set = set()  # This blocked ALL repeat trades for a symbol forever!
+    # Now: Each quarter has its own set, so AAPL can trade in Q1 and again in Q3
+    held_symbols_by_quarter: Dict[Tuple[int, int], set] = {}
 
     for _, r in df.iterrows():
         if not bool(r["trade_long"]):
@@ -141,16 +144,19 @@ def run_backtest(
         rd = pd.Timestamp(r["reaction_date"]).normalize()
         yq = _year_quarter(rd)
         cap_counter.setdefault(yq, 0)
+        held_symbols_by_quarter.setdefault(yq, set())
+
         if cap_counter[yq] >= config.cap_entries_per_quarter:
             continue
 
         sym = str(r["symbol"]).upper()
-        if (not config.allow_multiple_positions_same_symbol) and (sym in held_symbols):
-            # If multiple signals for same symbol appear (rare), keep the first one
+        # FIX: Only prevent duplicate entries within the SAME quarter, not across all time
+        if (not config.allow_multiple_positions_same_symbol) and (sym in held_symbols_by_quarter[yq]):
+            # If multiple signals for same symbol appear in same quarter (rare), keep the first one
             continue
 
         cap_counter[yq] += 1
-        held_symbols.add(sym)
+        held_symbols_by_quarter[yq].add(sym)
         accepted_rows.append({"symbol": sym, "reaction_date": rd})
 
     if not accepted_rows:
