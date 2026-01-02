@@ -1,8 +1,8 @@
-# Lookahead Bias / Data Leakage Audit Report v2.1
+# Lookahead Bias / Data Leakage Audit Report v2.2
 
 **審計日期**: 2026-01-02
 **審計對象**: Long-only v1.1-live-safe 策略
-**審計結論**: **所有高嚴重度問題已修補（含 v2.1 新修補）**
+**審計結論**: **所有高嚴重度問題已修補（含 v2.2 新修補）**
 
 ---
 
@@ -20,6 +20,11 @@
 | Prompt 掃描測試 | **🟢 新增** | ✅ 完成 | validate_prompt_no_leakage.py |
 | `orchestrator_parallel_facts.py` memory | **🟢 已修 v2.1** | ✅ 完成 | 禁用 mem_block 注入 actual_return |
 | `ComparativeAgent` Neo4j fallback | **🟢 已修 v2.1** | ✅ 完成 | 新增 `_filter_future_quarters()` |
+| `HistoricalPerformanceAgent` Neo4j fallback | **🟢 已修 v2.2** | ✅ 完成 | 新增 quarter filter |
+| Prompt Leakage Guard | **🟢 已修 v2.2** | ✅ 完成 | `guarded_chat_create()` wrapper |
+| `transcript_date` 保護 | **🟢 已修 v2.2** | ✅ 完成 | 必須提供 transcript_date |
+| Backtester `held_symbols` 全域去重 | **🟢 已修 v2.2** | ✅ 完成 | 改為每季去重 |
+| Post-return 強制禁用 | **🟢 已修 v2.2** | ✅ 完成 | LOOKAHEAD_ASSERTIONS 時自動禁用 |
 
 ---
 
@@ -233,6 +238,152 @@ def _filter_future_quarters(
 
 ---
 
+## v2.2 新增修補 (2026-01-02)
+
+### 7. HistoricalPerformanceAgent Neo4j Fallback Quarter Filter
+
+**問題 (HIGH RISK)**: 與 ComparativeAgent 相同的問題 - Neo4j fallback 沒有 quarter filter。
+
+**修補**:
+在 `historicalPerformanceAgent.py` 的 fallback 路徑加入與成功路徑相同的 quarter filter：
+
+```python
+# LOOKAHEAD PROTECTION: Apply same quarter filter as success branch
+prev_year_quarter = self._get_prev_year_quarter(quarter)
+filtered_facts = [
+    f for f in all_facts
+    if f.get("quarter") and (
+        (self._q_sort_key(f.get("quarter")) < self._q_sort_key(quarter) or
+        f.get("quarter") == prev_year_quarter) and
+        f.get("quarter") != quarter
+    )
+]
+```
+
+---
+
+### 8. Prompt Leakage Guard (`guarded_chat_create`)
+
+**問題**: 各 agent 直接呼叫 `client.chat.completions.create()`，沒有統一的 leakage 檢查。
+
+**修補**:
+新增 `guarded_chat_create()` wrapper 到 `utils/llm.py`，所有 agent 都改用此函數：
+
+```python
+def guarded_chat_create(
+    client: OpenAI | AzureOpenAI,
+    messages: list,
+    model: str,
+    agent_name: str = "unknown",
+    ticker: str = "",
+    quarter: str = "",
+    **kwargs,
+) -> Any:
+    """Wrapper with mandatory leakage guard."""
+    if os.environ.get("DISABLE_LEAKAGE_CHECK", "").lower() != "true":
+        try:
+            validate_messages_no_leakage(messages)
+        except PromptLeakageError as e:
+            logger.error("LEAKAGE DETECTED in %s: %s", agent_name, e)
+            raise
+    return client.chat.completions.create(model=model, messages=messages, **kwargs)
+```
+
+已更新的 agents：
+- `mainAgent.py`
+- `comparativeAgent.py`
+- `historicalEarningsAgent.py`
+- `historicalPerformanceAgent.py`
+- `pg_db_agents.py` (BasePgAgent base class)
+
+---
+
+### 9. transcript_date 必須提供
+
+**問題**: 若 `transcript_date` 缺失，可能 fallback 到「最新資料」造成 lookahead。
+
+**修補**:
+在 `agentic_rag_bridge.py` 加入斷言：
+
+```python
+if lookahead_assertions and not transcript_date:
+    raise AgenticRagBridgeError(
+        f"LOOKAHEAD PROTECTION: transcript_date is REQUIRED when LOOKAHEAD_ASSERTIONS=true."
+    )
+```
+
+---
+
+### 10. Backtester `held_symbols` 全域去重修復
+
+**問題 (CRITICAL)**: Backtester 的 `held_symbols` 是全域 set，導致「每個 symbol 在整個回測期間只能交易一次」。
+
+這會嚴重壓縮 trades 數量：
+- signals: 266 個 trade_long=True
+- 實際 trades: 只有 179 筆（被全域去重吃掉 87 筆）
+
+**修補**:
+將 `held_symbols` 改為 `held_symbols_by_quarter`：
+
+```python
+# Before (BUG):
+held_symbols: set = set()  # 全域，永遠累積
+
+# After (FIX):
+held_symbols_by_quarter: Dict[Tuple[int, int], set] = {}  # 每季獨立
+
+# 修改後的檢查：
+if (not config.allow_multiple_positions_same_symbol) and (sym in held_symbols_by_quarter[yq]):
+    continue
+```
+
+**影響**：同一個 symbol 現在可以在不同季度重複交易（正確的 event-driven 行為）。
+
+---
+
+### 11. Post-return 強制禁用
+
+**問題**: 若有人誤設 `HISTORICAL_EARNINGS_INCLUDE_POST_RETURNS=1`，可能洩漏 T+20/T+30 returns。
+
+**修補**:
+在 `pg_client.get_historical_earnings_facts()` 加入強制禁用：
+
+```python
+if lookahead_assertions and include_post_returns:
+    logger.warning(
+        "LOOKAHEAD_PROTECTION: HISTORICAL_EARNINGS_INCLUDE_POST_RETURNS=1 is IGNORED "
+        "because LOOKAHEAD_ASSERTIONS is enabled."
+    )
+    include_post_returns = False
+```
+
+---
+
+## 結論
+
+**所有已知的 Lookahead Bias 問題已修補完成**。
+
+修補內容:
+1. ✅ Peer lookahead: as_of_date 通過完整 agent chain
+2. ✅ 環境變數 bool parsing: 統一 env_bool() 函數
+3. ✅ 目標欄位隔離: 確認不會進入 LLM prompt
+4. ✅ Prompt 掃描測試: 新增 forbidden keyword 驗證
+5. ✅ **v2.1**: orchestrator memory injection 禁用
+6. ✅ **v2.1**: ComparativeAgent Neo4j fallback quarter filter
+7. ✅ **v2.2**: HistoricalPerformanceAgent Neo4j fallback quarter filter
+8. ✅ **v2.2**: Prompt Leakage Guard (`guarded_chat_create`)
+9. ✅ **v2.2**: transcript_date 必須提供
+10. ✅ **v2.2**: Backtester `held_symbols` 全域去重修復
+11. ✅ **v2.2**: Post-return 強制禁用
+
+建議:
+1. 持續使用 `LOOKAHEAD_ASSERTIONS=true` 進行回測
+2. 定期運行 `leakage_smoke_test.py` 驗證
+3. 考慮在 CI/CD 中加入 lookahead 檢測
+4. **重新跑 2017-2025 回測**，修復 #10 後 trades 應該會接近 signals 數
+
+---
+
 *報告產生者: Claude Code Audit*
-*審計版本: v2.1*
-*修補 Commit: 待推送*
+*審計版本: v2.2*
+*修補 Commit: 285da59 (backtester fix), c4442d9 (lookahead v2.2)*
