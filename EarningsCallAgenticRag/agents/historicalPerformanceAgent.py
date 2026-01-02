@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 from agents.prompts.prompts import get_financials_system_message, financials_statement_agent_prompt
-from utils.llm import build_chat_client, build_embeddings
+from utils.llm import build_chat_client, build_embeddings, guarded_chat_create
 from utils.token_tracker import TokenTracker
 from utils.neo4j_utils import get_neo4j_driver
 from utils.config import (
@@ -211,7 +211,24 @@ class HistoricalPerformanceAgent:
                         for f in all_facts:
                             f["score"] = cosine_sim(embedding, f["embedding"])
                         all_facts.sort(key=lambda x: x["score"], reverse=True)
-                        return all_facts[:top_n]
+
+                        # LOOKAHEAD PROTECTION: Apply same quarter filter as success branch
+                        # Only keep facts from strictly earlier quarters AND previous year's quarter
+                        # Explicitly exclude current quarter to prevent lookahead bias
+                        prev_year_quarter = self._get_prev_year_quarter(quarter)
+                        filtered_facts = [
+                            f for f in all_facts
+                            if f.get("quarter") and (
+                                (self._q_sort_key(f.get("quarter")) < self._q_sort_key(quarter) or
+                                f.get("quarter") == prev_year_quarter) and
+                                f.get("quarter") != quarter  # Explicitly exclude current quarter
+                            )
+                        ]
+                        logger.debug(
+                            "Fallback similarity search: filtered %d -> %d facts (excluded current/future quarters)",
+                            len(all_facts), len(filtered_facts)
+                        )
+                        return filtered_facts[:top_n]
                     except Exception as e2:
                         logger.error("Fallback similarity search failed in get_similar_facts_by_embedding: %s", e2)
                         return []
@@ -286,18 +303,27 @@ class HistoricalPerformanceAgent:
             similar_facts=all_similar,  # pass the aggregated similar facts
         )
 
+        # Build messages
+        messages = [
+            {"role": "system", "content": get_financials_system_message()},
+            {"role": "user", "content": prompt},
+        ]
+
         # GPT-5 models only support temperature=1; others use configured temperature
-        kwargs = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": get_financials_system_message()},
-                {"role": "user", "content": prompt},
-            ],
-        }
+        kwargs = {}
         if "gpt-5" not in self.model.lower():
             kwargs["temperature"] = self.temperature
 
-        resp = self.client.chat.completions.create(**kwargs)
+        # Use guarded_chat_create for lookahead protection
+        resp = guarded_chat_create(
+            client=self.client,
+            messages=messages,
+            model=self.model,
+            agent_name="HistoricalPerformanceAgent",
+            ticker=resolved_ticker,
+            quarter=quarter,
+            **kwargs,
+        )
         
         # Track token usage
         if hasattr(resp, 'usage') and resp.usage:

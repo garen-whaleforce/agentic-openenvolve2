@@ -432,12 +432,28 @@ def chat_completion_with_fallback(
     model: str,
     temperature: float = 0.0,
     max_tokens: int | None = None,
+    skip_leakage_check: bool = False,
     **kwargs,
 ) -> Any:
     """
     Execute chat completion with LiteLLM primary, Azure fallback.
     Returns the response object.
+
+    Args:
+        messages: List of message dicts
+        model: Model name
+        temperature: Sampling temperature
+        max_tokens: Max tokens to generate
+        skip_leakage_check: If True, skip the leakage validation (DANGEROUS - only for debugging)
+        **kwargs: Additional parameters
+
+    Raises:
+        PromptLeakageError: If messages contain forbidden keywords (unless skip_leakage_check=True)
     """
+    # LOOKAHEAD PROTECTION: Validate messages before sending to LLM
+    if not skip_leakage_check:
+        validate_messages_no_leakage(messages)
+
     def litellm_call():
         client, model_name = build_litellm_client(model)
         return client.chat.completions.create(
@@ -467,3 +483,50 @@ def chat_completion_with_fallback(
     fallback_fn = azure_call if (azure_key and azure_endpoint) else None
 
     return with_fallback_and_retry(litellm_call, fallback_fn)
+
+
+def guarded_chat_create(
+    client: OpenAI | AzureOpenAI,
+    messages: list,
+    model: str,
+    agent_name: str = "unknown",
+    ticker: str = "",
+    quarter: str = "",
+    **kwargs,
+) -> Any:
+    """
+    Wrapper for client.chat.completions.create with mandatory leakage guard.
+
+    This should be used by ALL agents instead of calling client.chat.completions.create directly.
+    Provides runtime protection against accidentally sending prediction targets to LLM.
+
+    Args:
+        client: OpenAI or AzureOpenAI client
+        messages: List of message dicts
+        model: Model name
+        agent_name: Name of the calling agent (for error context)
+        ticker: Current ticker (for error context)
+        quarter: Current quarter (for error context)
+        **kwargs: Additional parameters for chat.completions.create
+
+    Raises:
+        PromptLeakageError: If messages contain forbidden keywords
+
+    Returns:
+        Chat completion response
+    """
+    # Skip check if explicitly disabled (DANGEROUS - only for debugging)
+    if os.environ.get("DISABLE_LEAKAGE_CHECK", "").lower() != "true":
+        try:
+            validate_messages_no_leakage(messages)
+        except PromptLeakageError as e:
+            # Add context to the error
+            logger.error(
+                "LEAKAGE DETECTED in %s (ticker=%s, quarter=%s): %s",
+                agent_name, ticker, quarter, e
+            )
+            raise PromptLeakageError(
+                f"{e} [agent={agent_name}, ticker={ticker}, quarter={quarter}]"
+            ) from e
+
+    return client.chat.completions.create(model=model, messages=messages, **kwargs)

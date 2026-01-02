@@ -214,6 +214,17 @@ def run_single_call_from_context(
     if not symbol or not year or not quarter:
         raise AgenticRagBridgeError("context 缺少必填欄位：symbol、year、quarter。")
 
+    # LOOKAHEAD PROTECTION: In backtest/live-safe mode, transcript_date is REQUIRED
+    # Without it, we can't properly filter historical data and may leak future info
+    import os
+    lookahead_assertions = os.environ.get("LOOKAHEAD_ASSERTIONS", "").lower() in ("1", "true", "yes", "on")
+    if lookahead_assertions and not transcript_date:
+        raise AgenticRagBridgeError(
+            f"LOOKAHEAD PROTECTION: transcript_date is REQUIRED when LOOKAHEAD_ASSERTIONS=true. "
+            f"Symbol={symbol}, Year={year}, Quarter={quarter}. "
+            f"Cannot proceed without transcript_date as it would allow data leakage from future periods."
+        )
+
     # ------------------------------------------------------------------
     # Fetch market anchors (eps surprise, earnings day return, pre-earnings momentum)
     # ------------------------------------------------------------------

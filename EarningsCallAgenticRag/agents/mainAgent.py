@@ -25,7 +25,7 @@ from agents.prompts.prompts import (
     facts_extraction_prompt,
     main_agent_prompt,
 )
-from utils.llm import build_chat_client
+from utils.llm import build_chat_client, guarded_chat_create
 from utils.token_tracker import TokenTracker
 from utils.config import (
     MAX_FACTS_PER_HELPER,
@@ -104,26 +104,43 @@ class MainAgent:
         self.model = resolved_model
 
     # ------------ internal LLM helper ------------------------------------
-    def _chat(self, prompt: str, system: str = "", max_tokens: int | None = None) -> str:
-        """Wrapper around OpenAI chat completion with token tracking.
+    def _chat(
+        self,
+        prompt: str,
+        system: str = "",
+        max_tokens: int | None = None,
+        ticker: str = "",
+        quarter: str = "",
+    ) -> str:
+        """Wrapper around OpenAI chat completion with token tracking and leakage guard.
 
         Args:
             prompt: User prompt
             system: System message
             max_tokens: Maximum tokens for response (None = no limit, uses model default)
+            ticker: Current ticker (for leakage guard context)
+            quarter: Current quarter (for leakage guard context)
         """
         msgs = [{"role": "system", "content": system}] if system else []
         msgs.append({"role": "user", "content": prompt})
 
-        kwargs = {"model": self.model, "messages": msgs}
+        # GPT-5 models only support temperature=1; others use configured temperature
+        kwargs = {}
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
-
-        # GPT-5 models only support temperature=1; others use configured temperature
         if "gpt-5" not in self.model.lower():
             kwargs["temperature"] = self.temperature
 
-        resp = self.client.chat.completions.create(**kwargs)
+        # Use guarded_chat_create for lookahead protection
+        resp = guarded_chat_create(
+            client=self.client,
+            messages=msgs,
+            model=self.model,
+            agent_name="MainAgent",
+            ticker=ticker,
+            quarter=quarter,
+            **kwargs,
+        )
 
         if hasattr(resp, "usage") and resp.usage:
             self.token_tracker.add_usage(

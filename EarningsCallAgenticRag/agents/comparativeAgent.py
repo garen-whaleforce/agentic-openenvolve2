@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 from agents.prompts.prompts import get_comparative_system_message, comparative_agent_prompt
-from utils.llm import build_chat_client, build_embeddings
+from utils.llm import build_chat_client, build_embeddings, guarded_chat_create
 from utils.token_tracker import TokenTracker
 from utils.neo4j_utils import get_neo4j_driver
 from utils.config import (
@@ -459,18 +459,27 @@ class ComparativeAgent:
         #print(f"{'='*80}\n")
 
         try:
+            # Build messages
+            messages = [
+                {"role": "system", "content": get_comparative_system_message()},
+                {"role": "user", "content": prompt},
+            ]
+
             # GPT-5 models only support temperature=1; others use configured temperature
-            kwargs = {
-                "model": self.model,
-                "messages": [
-                    {"role": "system", "content": get_comparative_system_message()},
-                    {"role": "user", "content": prompt},
-                ],
-            }
+            kwargs = {}
             if "gpt-5" not in self.model.lower():
                 kwargs["temperature"] = self.temperature
 
-            resp = self.client.chat.completions.create(**kwargs)
+            # Use guarded_chat_create for lookahead protection
+            resp = guarded_chat_create(
+                client=self.client,
+                messages=messages,
+                model=self.model,
+                agent_name="ComparativeAgent",
+                ticker=ticker,
+                quarter=quarter,
+                **kwargs,
+            )
 
             # Track token usage
             if hasattr(resp, 'usage') and resp.usage:

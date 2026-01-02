@@ -34,7 +34,7 @@ from agents.prompts.prompts import (
     get_historical_earnings_system_message,
     get_comparative_system_message,
 )
-from utils.llm import build_chat_client
+from utils.llm import build_chat_client, guarded_chat_create
 from utils.token_tracker import TokenTracker
 from utils.config import (
     HELPER_MODEL as DEFAULT_HELPER_MODEL,
@@ -131,30 +131,48 @@ class BasePgAgent(ABC):
         self.temperature = temperature
         self.token_tracker = TokenTracker()
 
-    def _call_llm(self, system_message: str, user_message: str, max_tokens: int | None = None) -> str:
-        """Make an LLM call with token tracking.
+    def _call_llm(
+        self,
+        system_message: str,
+        user_message: str,
+        max_tokens: int | None = None,
+        ticker: str = "",
+        quarter: str = "",
+    ) -> str:
+        """Make an LLM call with token tracking and leakage guard.
 
         Args:
             system_message: System prompt
             user_message: User prompt
             max_tokens: Maximum tokens for response (None = use default MAX_TOKENS_HELPER)
+            ticker: Current ticker (for leakage guard context)
+            quarter: Current quarter (for leakage guard context)
 
         Returns:
             LLM response content
         """
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": user_message},
+        ]
+
+        # GPT-5 models only support temperature=1; others use configured temperature
         kwargs = {
-            "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message},
-            ],
             "max_tokens": max_tokens if max_tokens is not None else MAX_TOKENS_HELPER,
         }
-        # GPT-5 models only support temperature=1; others use configured temperature
         if "gpt-5" not in self.model.lower():
             kwargs["temperature"] = self.temperature
 
-        resp = self.client.chat.completions.create(**kwargs)
+        # Use guarded_chat_create for lookahead protection
+        resp = guarded_chat_create(
+            client=self.client,
+            messages=messages,
+            model=self.model,
+            agent_name=self.__class__.__name__,
+            ticker=ticker,
+            quarter=quarter,
+            **kwargs,
+        )
 
         if hasattr(resp, 'usage') and resp.usage:
             self.token_tracker.add_usage(
@@ -270,7 +288,7 @@ Compare the current facts with historical trends. Identify:
 
 Provide a concise analysis (2-3 paragraphs)."""
 
-        return self._call_llm(get_financials_system_message(), prompt)
+        return self._call_llm(get_financials_system_message(), prompt, ticker=ticker, quarter=quarter)
 
 
 # =============================================================================
@@ -342,7 +360,7 @@ Analyze:
 
 Provide a concise analysis (2-3 paragraphs)."""
 
-        return self._call_llm(get_historical_earnings_system_message(), prompt)
+        return self._call_llm(get_historical_earnings_system_message(), prompt, ticker=ticker, quarter=quarter)
 
 
 # =============================================================================
@@ -451,4 +469,4 @@ Analyze:
 
 Provide a concise analysis (2-3 paragraphs)."""
 
-        return self._call_llm(get_comparative_system_message(), prompt)
+        return self._call_llm(get_comparative_system_message(), prompt, ticker=ticker, quarter=quarter)
