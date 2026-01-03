@@ -1,0 +1,26 @@
+symbol,year,quarter,sector,trade_long_tier,actual_return,is_2022q1
+HOOD,2024,4,Financial Services,D7_CORE,-25.0224,False
+TTD,2020,4,Technology,D7_CORE,-22.8352,False
+RSG,2019,4,Industrials,D6_STRICT,-22.5836,False
+ZTS,2019,4,Healthcare,D6_STRICT,-21.8282,False
+BXP,2022,1,Real Estate,D7_CORE,-21.4944,True
+CHTR,2019,4,Communication Services,D7_CORE,-21.0698,False
+FIS,2019,4,Technology,D7_CORE,-18.8294,False
+DXCM,2018,3,Healthcare,D7_CORE,-18.5074,False
+TJX,2020,4,Consumer Cyclical,D7_CORE,-17.7662,False
+NCLH,2022,3,Consumer Cyclical,D7_CORE,-17.5165,False
+TECH,2025,2,Healthcare,D7_CORE,-16.8298,False
+GDDY,2019,4,Technology,D7_CORE,-16.5232,False
+CCL,2024,2,Consumer Cyclical,D7_CORE,-14.521,False
+OXY,2021,3,Energy,D7_CORE,-14.4225,False
+OXY,2024,4,Energy,D6_STRICT,-13.9047,False
+HAL,2017,4,Energy,D7_CORE,-13.3748,False
+EXR,2022,1,Real Estate,D7_CORE,-12.6441,True
+TMO,2020,4,Healthcare,D6_STRICT,-12.4132,False
+MGM,2024,4,Consumer Cyclical,D7_CORE,-11.6672,False
+CCL,2023,4,Consumer Cyclical,D7_CORE,-11.6215,False
+UNH,2019,4,Healthcare,D7_CORE,-11.5459,False
+PANW,2023,1,Technology,D7_CORE,-11.51,False
+AVGO,2022,3,Technology,D7_CORE,-11.5041,False
+HLT,2022,4,Consumer Cyclical,D7_CORE,-10.4902,False
+PODD,2023,1,Healthcare,D7_CORE,-10.4025,False

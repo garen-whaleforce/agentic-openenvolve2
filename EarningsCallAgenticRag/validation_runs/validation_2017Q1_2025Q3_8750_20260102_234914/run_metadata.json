@@ -1,0 +1,32 @@
+{
+  "run_timestamp": "2026-01-03T19:27:26.501705",
+  "git_commit": "9d6db72ffc78",
+  "seed": 42,
+  "samples_count": 8648,
+  "per_quarter": 250,
+  "concurrency": 20,
+  "range": "2017Q1-2025Q3",
+  "manifest_path": "validation_runs/validation_2017Q1_2025Q3_8750_20260102_234914/universe_manifest_seed42.csv",
+  "results_path": "validation_runs/validation_2017Q1_2025Q3_8750_20260102_234914/validation_results.csv",
+  "stats_files": {
+    "supplementary_stats": "validation_runs/validation_2017Q1_2025Q3_8750_20260102_234914/supplementary_stats.md",
+    "quarter_stats": "validation_runs/validation_2017Q1_2025Q3_8750_20260102_234914/long_quarter_stats.csv",
+    "year_stats": "validation_runs/validation_2017Q1_2025Q3_8750_20260102_234914/long_year_stats.csv",
+    "2019_attribution": "validation_runs/validation_2017Q1_2025Q3_8750_20260102_234914/2019_sector_tier_attribution.csv",
+    "2022_attribution": "validation_runs/validation_2017Q1_2025Q3_8750_20260102_234914/2022_sector_tier_attribution.csv",
+    "worst_losses": "validation_runs/validation_2017Q1_2025Q3_8750_20260102_234914/long_worst_losses.csv"
+  },
+  "env_snapshot": {
+    "AZURE_OPENAI_API_KEY": "[SET]",
+    "CALL_CACHE_VERSION": "v2.2",
+    "HISTORICAL_EARNINGS_INCLUDE_POST_RETURNS": "false",
+    "LOOKAHEAD_ASSERTIONS": "true",
+    "NEO4J_PASSWORD": "[SET]"
+  },
+  "lookahead_protection": {
+    "LOOKAHEAD_ASSERTIONS": "true",
+    "DISABLE_LEAKAGE_CHECK": null,
+    "HISTORICAL_EARNINGS_INCLUDE_POST_RETURNS": "false",
+    "CALL_CACHE_VERSION": "v2.2"
+  }
+}
